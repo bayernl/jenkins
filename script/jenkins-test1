@@ -1,0 +1,104 @@
+#!/usr/bin/env groovy
+
+node('gcp-agent') {
+    
+    def PROJECT_ID = 'grounded-camera-474601-f0'
+    def REGION = 'us-central1'
+    def REPOSITORY = 'my-quickstart-repo2'
+    def IMAGE_NAME = 'static-website'
+    def SERVICE_NAME = 'static-website-service'
+    
+    stage('Get Source Code') {
+        echo "Get Source Code from GitHub."
+        git branch: 'main', 
+            url: 'https://github.ibm.com/shunli/jenkins.git'
+    }
+    
+    stage('Config Authentication') {
+        echo "get GCP auth"
+        withCredentials([file(
+            credentialsId: 'gcp-personal-access',
+            variable: 'GCP_KEY_FILE'
+        )]) {
+            sh """
+                gcloud auth activate-service-account --key-file=\$GCP_KEY_FILE
+                gcloud config set project ${PROJECT_ID}
+            """
+        }
+    }
+    
+    stage('Config Docker Authentication') {
+        echo "Config Docker Authentication."
+        sh """        
+            # Config Docker Authentication
+            gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+        """
+    }
+    
+    stage('Build Docker Image') {
+        echo "Build Docker Image."
+        
+        def IMAGE_TAG = "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${IMAGE_NAME}:latest"
+        env.IMAGE_TAG = IMAGE_TAG
+        
+        sh """
+            docker build -t \${IMAGE_TAG} .
+        """
+    }
+    
+    stage('Push to Artifact Registry') {
+        echo "Push to Artifact Registry..."
+        sh """
+            docker push \${IMAGE_TAG}
+        """
+    }
+    
+    stage('Deploy to Cloud Run') {
+        echo "Deploy to Cloud Run."
+        
+        sh """
+            gcloud run deploy ${SERVICE_NAME} \
+                --image=\${IMAGE_TAG} \
+                --platform=managed \
+                --region=${REGION} \
+                --port=8080 \
+                --allow-unauthenticated \
+                --memory=1Gi \
+                --cpu=1 \
+                --max-instances=2 \
+                --timeout=300s
+        """
+        
+        def SERVICE_URL = sh(
+            script: "gcloud run services describe ${SERVICE_NAME} --region=${REGION} --format='value(status.url)'",
+            returnStdout: true
+        ).trim()
+        
+        env.SERVICE_URL = SERVICE_URL
+        echo "Deploy complete. URL: ${SERVICE_URL}"
+    }
+    
+    stage('Verification') {
+        echo "Verificate deployment."
+        sh """
+            echo "wait for Verification."
+            sleep 30
+            
+            # test URL
+            if curl -f \${SERVICE_URL} >/dev/null 2>&1; then
+                echo "test URL success."
+                echo "   \${SERVICE_URL}"
+            else
+                echo "test URL failed."
+                exit 1
+            fi
+        """
+    }
+    
+    stage('Cleanup') {
+        echo "Cleanup."
+        sh """
+            docker rmi \${IMAGE_TAG} 2>/dev/null || true
+        """
+    }
+}
